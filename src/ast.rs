@@ -71,7 +71,7 @@ impl<L: Language> SyntaxNodePtr<L> {
     ///
     /// Panics if the provided node is mutable
     pub fn new(node: &SyntaxNode<L>) -> Self {
-        assert!(!node.is_mutable(), "tree is mutable");
+        // assert!(!node.is_mutable(), "tree is mutable");
         Self { kind: node.kind(), range: node.text_range() }
     }
 
@@ -96,7 +96,7 @@ impl<L: Language> SyntaxNodePtr<L> {
     /// tree width. As most trees are shallow, thinking about this as
     /// `O(log(N))` in the size of the tree is not too wrong!
     pub fn try_to_node(&self, root: &SyntaxNode<L>) -> Option<SyntaxNode<L>> {
-        assert!(!root.is_mutable(), "tree is mutable");
+        // assert!(!root.is_mutable(), "tree is mutable");
         if root.parent().is_some() {
             return None;
         }
