@@ -133,7 +133,7 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.parent().map(Self::from)
     }
 
-    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         self.raw.ancestors().map(SyntaxNode::from)
     }
 
@@ -219,22 +219,22 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.last_token().map(SyntaxToken::from)
     }
 
-    pub fn siblings(&self, direction: Direction) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn siblings(&self, direction: Direction) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         self.raw.siblings(direction).map(SyntaxNode::from)
     }
 
     pub fn siblings_with_tokens(
         &self,
         direction: Direction,
-    ) -> impl Iterator<Item = SyntaxElement<L>> {
+    ) -> impl Iterator<Item = SyntaxElement<L>> + use<L> {
         self.raw.siblings_with_tokens(direction).map(SyntaxElement::from)
     }
 
-    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         self.raw.descendants().map(SyntaxNode::from)
     }
 
-    pub fn descendants_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<L>> {
+    pub fn descendants_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<L>> + use<L> {
         self.raw.descendants_with_tokens().map(NodeOrToken::from)
     }
 
@@ -337,12 +337,12 @@ impl<L: Language> SyntaxToken<L> {
 
     /// Iterator over all the ancestors of this token excluding itself.
     #[deprecated = "use `SyntaxToken::parent_ancestors` instead"]
-    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         self.parent_ancestors()
     }
 
     /// Iterator over all the ancestors of this token excluding itself.
-    pub fn parent_ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn parent_ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         self.raw.ancestors().map(SyntaxNode::from)
     }
 
@@ -356,7 +356,7 @@ impl<L: Language> SyntaxToken<L> {
     pub fn siblings_with_tokens(
         &self,
         direction: Direction,
-    ) -> impl Iterator<Item = SyntaxElement<L>> {
+    ) -> impl Iterator<Item = SyntaxElement<L>> + use<L> {
         self.raw.siblings_with_tokens(direction).map(SyntaxElement::from)
     }
 
@@ -403,7 +403,7 @@ impl<L: Language> SyntaxElement<L> {
         }
     }
 
-    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<L>> + use<L> {
         let first = match self {
             NodeOrToken::Node(it) => Some(it.clone()),
             NodeOrToken::Token(it) => it.parent(),
@@ -445,7 +445,10 @@ impl<L: Language> Iterator for SyntaxNodeChildren<L> {
 }
 
 impl<L: Language> SyntaxNodeChildren<L> {
-    pub fn by_kind(self, matcher: impl Fn(L::Kind) -> bool) -> impl Iterator<Item = SyntaxNode<L>> {
+    pub fn by_kind<F: Fn(L::Kind) -> bool>(
+        self,
+        matcher: F,
+    ) -> impl Iterator<Item = SyntaxNode<L>> + use<F, L> {
         self.raw.by_kind(move |raw_kind| matcher(L::kind_from_raw(raw_kind))).map(SyntaxNode::from)
     }
 }
@@ -464,10 +467,10 @@ impl<L: Language> Iterator for SyntaxElementChildren<L> {
 }
 
 impl<L: Language> SyntaxElementChildren<L> {
-    pub fn by_kind(
+    pub fn by_kind<F: Fn(L::Kind) -> bool>(
         self,
-        matcher: impl Fn(L::Kind) -> bool,
-    ) -> impl Iterator<Item = SyntaxElement<L>> {
+        matcher: F,
+    ) -> impl Iterator<Item = SyntaxElement<L>> + use<L, F> {
         self.raw.by_kind(move |raw_kind| matcher(L::kind_from_raw(raw_kind))).map(NodeOrToken::from)
     }
 }
