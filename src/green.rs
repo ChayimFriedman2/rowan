@@ -3,6 +3,7 @@ mod token;
 mod element;
 mod builder;
 mod node_cache;
+mod arena;
 
 use self::element::GreenElement;
 

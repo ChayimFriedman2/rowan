@@ -35,8 +35,8 @@ struct NoHash<T>(T);
 // we don't accidentally use the wrong hash!
 #[derive(Default, Debug)]
 pub struct NodeCache {
-    nodes: HashMap<NoHash<GreenNode>, ()>,
-    tokens: HashMap<NoHash<GreenToken>, ()>,
+    // nodes: HashMap<NoHash<GreenNode>, ()>,
+    // tokens: HashMap<NoHash<GreenToken>, ()>,
 }
 
 fn token_hash(token: &GreenTokenData) -> u64 {
@@ -103,29 +103,30 @@ impl NodeCache {
         // For example, all `#[inline]` in this file share the same green node!
         // For `libsyntax/parse/parser.rs`, measurements show that deduping saves
         // 17% of the memory for green nodes!
-        let entry = self.nodes.raw_entry_mut().from_hash(hash, |node| {
-            node.0.kind() == kind && node.0.children().len() == children_ref.len() && {
-                let lhs = node.0.children();
-                let rhs = children_ref.iter().map(|(_, it)| it.as_deref());
+        // let entry = self.nodes.raw_entry_mut().from_hash(hash, |node| {
+        //     node.0.kind() == kind && node.0.children().len() == children_ref.len() && {
+        //         let lhs = node.0.children();
+        //         let rhs = children_ref.iter().map(|(_, it)| it.as_deref());
 
-                let lhs = lhs.map(element_id);
-                let rhs = rhs.map(element_id);
+        //         let lhs = lhs.map(element_id);
+        //         let rhs = rhs.map(element_id);
 
-                lhs.eq(rhs)
-            }
-        });
+        //         lhs.eq(rhs)
+        //     }
+        // });
 
-        let node = match entry {
-            RawEntryMut::Occupied(entry) => {
-                drop(children.drain(first_child..));
-                entry.key().0.clone()
-            }
-            RawEntryMut::Vacant(entry) => {
-                let node = build_node(children);
-                entry.insert_with_hasher(hash, NoHash(node.clone()), (), |n| node_hash(&n.0));
-                node
-            }
-        };
+        let node = build_node(children);
+        // let node = match entry {
+        //     RawEntryMut::Occupied(entry) => {
+        //         drop(children.drain(first_child..));
+        //         entry.key().0.clone()
+        //     }
+        //     RawEntryMut::Vacant(entry) => {
+        //         let node = build_node(children);
+        //         entry.insert_with_hasher(hash, NoHash(node.clone()), (), |n| node_hash(&n.0));
+        //         node
+        //     }
+        // };
 
         (hash, node)
     }
@@ -138,19 +139,20 @@ impl NodeCache {
             h.finish()
         };
 
-        let entry = self
-            .tokens
-            .raw_entry_mut()
-            .from_hash(hash, |token| token.0.kind() == kind && token.0.text() == text);
+        // let entry = self
+        //     .tokens
+        //     .raw_entry_mut()
+        //     .from_hash(hash, |token| token.0.kind() == kind && token.0.text() == text);
 
-        let token = match entry {
-            RawEntryMut::Occupied(entry) => entry.key().0.clone(),
-            RawEntryMut::Vacant(entry) => {
-                let token = GreenToken::new(kind, text);
-                entry.insert_with_hasher(hash, NoHash(token.clone()), (), |t| token_hash(&t.0));
-                token
-            }
-        };
+        let token = GreenToken::new(kind, text);
+        // let token = match entry {
+        //     RawEntryMut::Occupied(entry) => entry.key().0.clone(),
+        //     RawEntryMut::Vacant(entry) => {
+        //         let token = GreenToken::new(kind, text);
+        //         entry.insert_with_hasher(hash, NoHash(token.clone()), (), |t| token_hash(&t.0));
+        //         token
+        //     }
+        // };
 
         (hash, token)
     }
