@@ -772,7 +772,8 @@ impl SyntaxNode {
         to_insert: I,
     ) {
         assert!(self.arena.mutable(), "immutable tree: {}", self);
-        for (i, child) in self.children_with_tokens().enumerate() {
+        let childrens = Vec::from_iter(self.children_with_tokens());
+        for (i, child) in childrens.into_iter().enumerate() {
             if to_delete.contains(&i) {
                 child.detach();
             }
@@ -1151,122 +1152,184 @@ impl From<SyntaxToken> for SyntaxElement {
 
 #[derive(Clone, Debug)]
 pub struct SyntaxNodeChildren {
-    parent: SyntaxNode,
-    next: Option<SyntaxNode>,
-    next_initialized: bool,
+    inner: SyntaxElementChildren,
 }
 
 impl SyntaxNodeChildren {
     fn new(parent: SyntaxNode) -> SyntaxNodeChildren {
-        SyntaxNodeChildren { parent, next: None, next_initialized: false }
+        SyntaxNodeChildren { inner: SyntaxElementChildren::new(parent) }
     }
 
-    pub fn by_kind<F: Fn(SyntaxKind) -> bool>(self, matcher: F) -> SyntaxNodeChildrenByKind<F> {
-        if !self.next_initialized {
-            SyntaxNodeChildrenByKind { next: self.parent.first_child_by_kind(&matcher), matcher }
-        } else {
-            SyntaxNodeChildrenByKind {
-                next: self.next.and_then(|node| {
-                    if matcher(node.kind()) {
-                        Some(node)
-                    } else {
-                        node.next_sibling_by_kind(&matcher)
-                    }
-                }),
-                matcher,
-            }
-        }
+    #[inline]
+    pub fn by_kind<F: FnMut(SyntaxKind) -> bool>(self, matcher: F) -> SyntaxNodeChildrenByKind<F> {
+        SyntaxNodeChildrenByKind { inner: self.inner, matcher }
     }
 }
 
 impl Iterator for SyntaxNodeChildren {
     type Item = SyntaxNode;
-    fn next(&mut self) -> Option<SyntaxNode> {
-        if !self.next_initialized {
-            self.next = self.parent.first_child();
-            self.next_initialized = true;
-        } else {
-            self.next = self.next.take().and_then(|next| next.to_next_sibling());
-        }
 
-        self.next.clone()
+    #[inline]
+    fn next(&mut self) -> Option<SyntaxNode> {
+        let child = loop {
+            let (index, child) = self.inner.children.next()?;
+            match *child {
+                GreenChild::Node { rel_offset, node } => {
+                    break unsafe {
+                        SyntaxNode::new_child(
+                            self.inner.parent.arena.clone(),
+                            node,
+                            self.inner.parent.ptr,
+                            index as u32,
+                            self.inner.parent_offset + rel_offset,
+                        )
+                    };
+                }
+                GreenChild::Token { .. } => continue,
+            }
+        };
+        Some(child)
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct SyntaxNodeChildrenByKind<F: Fn(SyntaxKind) -> bool> {
-    next: Option<SyntaxNode>,
+pub struct SyntaxNodeChildrenByKind<F: FnMut(SyntaxKind) -> bool> {
+    inner: SyntaxElementChildren,
     matcher: F,
 }
 
-impl<F: Fn(SyntaxKind) -> bool> Iterator for SyntaxNodeChildrenByKind<F> {
+impl<F: FnMut(SyntaxKind) -> bool> Iterator for SyntaxNodeChildrenByKind<F> {
     type Item = SyntaxNode;
+
+    #[inline]
     fn next(&mut self) -> Option<SyntaxNode> {
-        self.next.take().inspect(|next| {
-            self.next = next.next_sibling_by_kind(&self.matcher);
-        })
+        let child = loop {
+            let (index, child) = self.inner.children.next()?;
+            match *child {
+                GreenChild::Node { rel_offset, node } if (self.matcher)(node.kind()) => {
+                    break unsafe {
+                        SyntaxNode::new_child(
+                            self.inner.parent.arena.clone(),
+                            node,
+                            self.inner.parent.ptr,
+                            index as u32,
+                            self.inner.parent_offset + rel_offset,
+                        )
+                    };
+                }
+                _ => continue,
+            }
+        };
+        Some(child)
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SyntaxElementChildren {
+    children: std::iter::Enumerate<std::slice::Iter<'static, GreenChild>>,
+    parent_offset: TextSize,
     parent: SyntaxNode,
-    next: Option<SyntaxElement>,
-    next_initialized: bool,
+}
+
+impl fmt::Debug for SyntaxElementChildren {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyntaxElementChildren").field("children", &self.children).finish()
+    }
 }
 
 impl SyntaxElementChildren {
+    #[inline]
     fn new(parent: SyntaxNode) -> SyntaxElementChildren {
-        SyntaxElementChildren { parent, next: None, next_initialized: false }
+        let parent_offset = parent.offset();
+        let parent_green = parent.green_in_tree();
+        // Lifetime-extend it.
+        // SAFETY: We keep a reference to the tree.
+        let children = unsafe { &*ptr::from_ref(parent_green.children()) };
+        SyntaxElementChildren { children: children.iter().enumerate(), parent_offset, parent }
     }
 
-    pub fn by_kind<F: Fn(SyntaxKind) -> bool>(self, matcher: F) -> SyntaxElementChildrenByKind<F> {
-        if !self.next_initialized {
-            SyntaxElementChildrenByKind {
-                next: self.parent.first_child_or_token_by_kind(&matcher),
-                matcher,
-            }
-        } else {
-            SyntaxElementChildrenByKind {
-                next: self.next.and_then(|node| {
-                    if matcher(node.kind()) {
-                        Some(node)
-                    } else {
-                        node.next_sibling_or_token_by_kind(&matcher)
-                    }
-                }),
-                matcher,
-            }
-        }
+    #[inline]
+    pub fn by_kind<F: FnMut(SyntaxKind) -> bool>(
+        self,
+        matcher: F,
+    ) -> SyntaxElementChildrenByKind<F> {
+        SyntaxElementChildrenByKind { inner: self, matcher }
     }
 }
 
 impl Iterator for SyntaxElementChildren {
     type Item = SyntaxElement;
-    fn next(&mut self) -> Option<SyntaxElement> {
-        if !self.next_initialized {
-            self.next = self.parent.first_child_or_token();
-            self.next_initialized = true;
-        } else {
-            self.next = self.next.take().and_then(|next| next.to_next_sibling_or_token());
-        }
 
-        self.next.clone()
+    #[inline]
+    fn next(&mut self) -> Option<SyntaxElement> {
+        let (index, child) = self.children.next()?;
+        let child = match *child {
+            GreenChild::Node { rel_offset, node } => NodeOrToken::Node(unsafe {
+                SyntaxNode::new_child(
+                    self.parent.arena.clone(),
+                    node,
+                    self.parent.ptr,
+                    index as u32,
+                    self.parent_offset + rel_offset,
+                )
+            }),
+            GreenChild::Token { rel_offset, token } => NodeOrToken::Token(unsafe {
+                SyntaxToken::new(
+                    self.parent.arena.clone(),
+                    token,
+                    self.parent.ptr,
+                    index as u32,
+                    self.parent_offset + rel_offset,
+                )
+            }),
+        };
+        Some(child)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.children.size_hint()
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct SyntaxElementChildrenByKind<F: Fn(SyntaxKind) -> bool> {
-    next: Option<SyntaxElement>,
+pub struct SyntaxElementChildrenByKind<F: FnMut(SyntaxKind) -> bool> {
+    inner: SyntaxElementChildren,
     matcher: F,
 }
 
-impl<F: Fn(SyntaxKind) -> bool> Iterator for SyntaxElementChildrenByKind<F> {
+impl<F: FnMut(SyntaxKind) -> bool> Iterator for SyntaxElementChildrenByKind<F> {
     type Item = SyntaxElement;
+
+    #[inline]
     fn next(&mut self) -> Option<SyntaxElement> {
-        self.next.take().inspect(|next| {
-            self.next = next.next_sibling_or_token_by_kind(&self.matcher);
-        })
+        let child = loop {
+            let (index, child) = self.inner.children.next()?;
+            if !(self.matcher)(child.kind()) {
+                continue;
+            }
+            break match *child {
+                GreenChild::Node { rel_offset, node } => NodeOrToken::Node(unsafe {
+                    SyntaxNode::new_child(
+                        self.inner.parent.arena.clone(),
+                        node,
+                        self.inner.parent.ptr,
+                        index as u32,
+                        self.inner.parent_offset + rel_offset,
+                    )
+                }),
+                GreenChild::Token { rel_offset, token } => NodeOrToken::Token(unsafe {
+                    SyntaxToken::new(
+                        self.inner.parent.arena.clone(),
+                        token,
+                        self.inner.parent.ptr,
+                        index as u32,
+                        self.inner.parent_offset + rel_offset,
+                    )
+                }),
+            };
+        };
+        Some(child)
     }
 }
 
