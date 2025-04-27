@@ -1,8 +1,8 @@
-use std::{
-    fmt,
-    ops::{AddAssign, Deref},
-};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+use std::{fmt, ops::AddAssign};
 use text_size::TextSize;
+use triomphe::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NodeOrToken<N, T> {
@@ -11,6 +11,14 @@ pub enum NodeOrToken<N, T> {
 }
 
 impl<N, T> NodeOrToken<N, T> {
+    #[inline]
+    pub(crate) fn as_ref(&self) -> NodeOrToken<&N, &T> {
+        match *self {
+            NodeOrToken::Node(ref node) => NodeOrToken::Node(node),
+            NodeOrToken::Token(ref token) => NodeOrToken::Token(token),
+        }
+    }
+
     pub fn into_node(self) -> Option<N> {
         match self {
             NodeOrToken::Node(node) => Some(node),
@@ -36,15 +44,6 @@ impl<N, T> NodeOrToken<N, T> {
         match self {
             NodeOrToken::Node(_) => None,
             NodeOrToken::Token(token) => Some(token),
-        }
-    }
-}
-
-impl<N: Deref, T: Deref> NodeOrToken<N, T> {
-    pub(crate) fn as_deref(&self) -> NodeOrToken<&N::Target, &T::Target> {
-        match self {
-            NodeOrToken::Node(node) => NodeOrToken::Node(node),
-            NodeOrToken::Token(token) => NodeOrToken::Token(token),
         }
     }
 }
@@ -149,14 +148,6 @@ impl<T> Iterator for TokenAtOffset<T> {
 
 impl<T> ExactSizeIterator for TokenAtOffset<T> {}
 
-macro_rules! _static_assert {
-    ($expr:expr) => {
-        const _: i32 = 0 / $expr as i32;
-    };
-}
-
-pub(crate) use _static_assert as static_assert;
-
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Delta<T> {
     Add(T),
@@ -178,3 +169,41 @@ macro_rules! impls {
     )*};
 }
 impls!(u32 TextSize);
+
+/// An `Arc` that compares by identity.
+pub(crate) struct PtrEqArc<T>(pub(crate) Arc<T>);
+
+impl<T> PartialEq for PtrEqArc<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Eq for PtrEqArc<T> {}
+
+impl<T> Hash for PtrEqArc<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_ptr().hash(state);
+    }
+}
+
+/// An `Rc` that compares by identity.
+pub(crate) struct PtrEqRc<T>(pub(crate) Rc<T>);
+
+impl<T> PartialEq for PtrEqRc<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Eq for PtrEqRc<T> {}
+
+impl<T> Hash for PtrEqRc<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.0).hash(state);
+    }
+}

@@ -17,11 +17,8 @@ pub mod api;
 mod syntax_text;
 mod utility_types;
 
-mod cow_mut;
 #[allow(unsafe_code)]
 mod sll;
-#[allow(unsafe_code)]
-mod arc;
 #[cfg(feature = "serde1")]
 mod serde_impls;
 pub mod ast;
@@ -32,10 +29,7 @@ pub use crate::{
     api::{
         Language, SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
     },
-    green::{
-        Checkpoint, Children, GreenNode, GreenNodeBuilder, GreenNodeData, GreenToken,
-        GreenTokenData, NodeCache, SyntaxKind,
-    },
+    green::{Checkpoint, Children, GreenNode, GreenNodeBuilder, GreenToken, NodeCache, SyntaxKind},
     syntax_text::SyntaxText,
     utility_types::{Direction, NodeOrToken, TokenAtOffset, WalkEvent},
 };

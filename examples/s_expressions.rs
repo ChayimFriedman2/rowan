@@ -82,7 +82,7 @@ fn parse(text: &str) -> Parse {
         /// in *reverse* order.
         tokens: Vec<(SyntaxKind, String)>,
         /// the in-progress tree.
-        builder: GreenNodeBuilder<'static>,
+        builder: GreenNodeBuilder,
         /// the list of syntax errors we've accumulated
         /// so far.
         errors: Vec<String>,

@@ -1,8 +1,8 @@
-use std::{borrow::Cow, fmt, iter, marker::PhantomData, ops::Range};
+use std::{fmt, iter, marker::PhantomData, ops::Range};
 
 use crate::{
-    Direction, GreenNode, GreenNodeData, GreenToken, NodeOrToken, SyntaxKind, SyntaxText,
-    TextRange, TextSize, TokenAtOffset, WalkEvent, cursor, green::GreenTokenData,
+    Direction, GreenNode, GreenToken, NodeOrToken, SyntaxKind, SyntaxText, TextRange, TextSize,
+    TokenAtOffset, WalkEvent, cursor,
 };
 
 pub trait Language: Sized + Copy + fmt::Debug + Eq + Ord + std::hash::Hash {
@@ -103,8 +103,7 @@ impl<L: Language> SyntaxNode<L> {
     }
 
     /// Returns a green tree, equal to the green tree this node
-    /// belongs to, except with this node substituted. The complexity
-    /// of the operation is proportional to the depth of the tree.
+    /// belongs to, except with this node substituted.
     pub fn replace_with(&self, replacement: GreenNode) -> GreenNode {
         self.raw.replace_with(replacement)
     }
@@ -125,7 +124,7 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.text()
     }
 
-    pub fn green(&self) -> Cow<'_, GreenNodeData> {
+    pub fn green(&self) -> GreenNode {
         self.raw.green()
     }
 
@@ -327,7 +326,7 @@ impl<L: Language> SyntaxToken<L> {
         self.raw.text()
     }
 
-    pub fn green(&self) -> &GreenTokenData {
+    pub fn green(&self) -> GreenToken {
         self.raw.green()
     }
 

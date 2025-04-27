@@ -2,8 +2,7 @@ use std::num::NonZeroUsize;
 
 use crate::{
     NodeOrToken,
-    cow_mut::CowMut,
-    green::{GreenElement, GreenNode, SyntaxKind, node_cache::NodeCache},
+    green::{GreenNode, SyntaxKind, element::GreenElementInTree, node_cache::NodeCache},
 };
 
 /// A checkpoint for maybe wrapping a node. See `GreenNodeBuilder::checkpoint` for details.
@@ -21,27 +20,24 @@ impl Checkpoint {
 }
 
 /// A builder for a green tree.
-#[derive(Default, Debug)]
-pub struct GreenNodeBuilder<'cache> {
-    cache: CowMut<'cache, NodeCache>,
+#[derive(Default)]
+pub struct GreenNodeBuilder {
+    cache: NodeCache,
     parents: Vec<(SyntaxKind, usize)>,
-    children: Vec<(u64, GreenElement)>,
+    children: Vec<(u64, GreenElementInTree)>,
 }
 
-impl GreenNodeBuilder<'_> {
-    /// Creates new builder.
-    pub fn new() -> GreenNodeBuilder<'static> {
-        GreenNodeBuilder::default()
+impl std::fmt::Debug for GreenNodeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GreenNodeBuilder").finish_non_exhaustive()
     }
+}
 
-    /// Reusing `NodeCache` between different `GreenNodeBuilder`s saves memory.
-    /// It allows to structurally share underlying trees.
-    pub fn with_cache(cache: &mut NodeCache) -> GreenNodeBuilder<'_> {
-        GreenNodeBuilder {
-            cache: CowMut::Borrowed(cache),
-            parents: Vec::new(),
-            children: Vec::new(),
-        }
+impl GreenNodeBuilder {
+    /// Creates new builder.
+    #[inline]
+    pub fn new() -> GreenNodeBuilder {
+        GreenNodeBuilder::default()
     }
 
     /// Adds new token to the current branch.
@@ -122,9 +118,10 @@ impl GreenNodeBuilder<'_> {
     /// are paired!
     #[inline]
     pub fn finish(mut self) -> GreenNode {
+        let arena = self.cache.arena.shareable();
         assert_eq!(self.children.len(), 1);
         match self.children.pop().unwrap().1 {
-            NodeOrToken::Node(node) => node,
+            NodeOrToken::Node(node) => GreenNode { node, arena },
             NodeOrToken::Token(_) => panic!(),
         }
     }

@@ -1,107 +1,315 @@
 use std::{
-    borrow::{Borrow, Cow},
+    alloc::Layout,
     fmt,
+    hash::{Hash, Hasher},
     iter::{self, FusedIterator},
-    mem::{self, ManuallyDrop},
-    ops, ptr, slice,
+    mem,
+    ops::RangeBounds,
+    ptr::NonNull,
+    slice,
 };
 
 use countme::Count;
+use triomphe::Arc;
 
 use crate::{
     GreenToken, NodeOrToken, TextRange, TextSize,
-    arc::{Arc, HeaderSlice, ThinArc},
-    green::{GreenElement, GreenElementRef, SyntaxKind},
-    utility_types::static_assert,
+    green::{
+        GreenElement, GreenElementInTree, SyntaxKind, arena::GreenTree, token::GreenTokenInTree,
+    },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct GreenNodeHead {
     kind: SyntaxKind,
     text_len: TextSize,
+    children_len: u32,
     _c: Count<GreenNode>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
+// The following impls don't include `children_len`, it will be handled as the slice len.
+impl Hash for GreenNodeHead {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self { kind, text_len, children_len: _, _c: _ } = self;
+        kind.hash(state);
+        text_len.hash(state);
+    }
+}
+
+impl PartialEq for GreenNodeHead {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        let Self { kind, text_len, children_len: _, _c: _ } = self;
+        let Self { kind: other_kind, text_len: other_text_len, children_len: _, _c: _ } = other;
+        kind == other_kind && text_len == other_text_len
+    }
+}
+
+impl Eq for GreenNodeHead {}
+
+impl GreenNodeHead {
+    #[inline]
+    pub(super) fn layout(children_len: usize) -> Layout {
+        Layout::new::<GreenNodeHead>()
+            .extend(Layout::array::<GreenChild>(children_len).expect("too big node"))
+            .expect("too big node")
+            .0
+            .pad_to_align()
+    }
+
+    #[inline]
+    pub(super) fn new(kind: SyntaxKind, text_len: TextSize, children_len: usize) -> Self {
+        Self { kind, text_len, children_len: children_len as u32, _c: Count::new() }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(crate) enum GreenChild {
-    Node { rel_offset: TextSize, node: GreenNode },
-    Token { rel_offset: TextSize, token: GreenToken },
+    Node { rel_offset: TextSize, node: GreenNodeInTree },
+    Token { rel_offset: TextSize, token: GreenTokenInTree },
 }
 #[cfg(target_pointer_width = "64")]
-static_assert!(mem::size_of::<GreenChild>() == mem::size_of::<usize>() * 2);
+const _: () = assert!(mem::size_of::<GreenChild>() == mem::size_of::<usize>() * 2);
 
-type Repr = HeaderSlice<GreenNodeHead, [GreenChild]>;
-type ReprThin = HeaderSlice<GreenNodeHead, [GreenChild; 0]>;
-#[repr(transparent)]
-pub struct GreenNodeData {
-    data: ReprThin,
+impl GreenChild {
+    #[inline]
+    pub(crate) fn as_node(&self) -> Option<&GreenNodeInTree> {
+        match self {
+            GreenChild::Node { rel_offset: _, node } => Some(node),
+            GreenChild::Token { .. } => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn kind(&self) -> SyntaxKind {
+        match self {
+            GreenChild::Node { rel_offset: _, node } => node.kind(),
+            GreenChild::Token { rel_offset: _, token } => token.kind(),
+        }
+    }
 }
 
-impl PartialEq for GreenNodeData {
+impl fmt::Display for GreenChild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Node { rel_offset: _, node } => fmt::Display::fmt(node, f),
+            Self::Token { rel_offset: _, token } => fmt::Display::fmt(token, f),
+        }
+    }
+}
+
+#[repr(C)]
+pub(super) struct GreenNodeData {
+    head: GreenNodeHead,
+    children: [GreenChild; 0],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GreenNodeInTree {
+    /// INVARIANT: This points at a valid `GreenNodeHead` then `children_len` `GreenChild`s,
+    /// with `#[repr(C)]`.
+    pub(super) data: NonNull<GreenNodeData>,
+}
+
+// SAFETY: The pointer is valid.
+unsafe impl Send for GreenNodeInTree {}
+unsafe impl Sync for GreenNodeInTree {}
+
+impl GreenNodeInTree {
+    /// Does not require the pointer to be valid.
+    #[inline]
+    pub(super) fn header_ptr_mut(&self) -> *mut GreenNodeHead {
+        // SAFETY: `&raw mut` doesn't require the data to be valid, only allocated.
+        unsafe { &raw mut (*self.data.as_ptr()).head }
+    }
+
+    #[inline]
+    pub(super) fn children_ptr_mut(&self) -> *mut GreenChild {
+        // SAFETY: `&raw mut` doesn't require the data to be valid, only allocated.
+        unsafe { (&raw mut (*self.data.as_ptr()).children).cast::<GreenChild>() }
+    }
+
+    #[inline]
+    fn header(&self) -> &GreenNodeHead {
+        // SAFETY: `data`'s invariant.
+        unsafe { &*self.header_ptr_mut() }
+    }
+
+    #[inline]
+    pub(crate) fn children(&self) -> &[GreenChild] {
+        // SAFETY: `data`'s invariant.
+        unsafe {
+            slice::from_raw_parts(self.children_ptr_mut(), self.header().children_len as usize)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn kind(&self) -> SyntaxKind {
+        self.header().kind
+    }
+
+    #[inline]
+    pub(crate) fn text_len(&self) -> TextSize {
+        self.header().text_len
+    }
+
+    #[inline]
+    pub(crate) fn as_ptr(self) -> NonNull<()> {
+        self.data.cast()
+    }
+
+    #[inline]
+    pub(crate) fn to_green_node(self, arena: Arc<GreenTree>) -> GreenNode {
+        GreenNode { node: self, arena }
+    }
+
+    /// # Safety
+    ///
+    /// You must ensure there is no concurrent allocation.
+    #[must_use]
+    pub unsafe fn insert_child(
+        &self,
+        index: usize,
+        new_child: GreenElementInTree,
+        arena: &GreenTree,
+    ) -> GreenNodeInTree {
+        // SAFETY: Our precondition.
+        unsafe { self.splice_children(index..index, iter::once(new_child), arena) }
+    }
+
+    /// # Safety
+    ///
+    /// You must ensure there is no concurrent allocation.
+    #[must_use]
+    pub unsafe fn remove_child(&self, index: usize, arena: &GreenTree) -> GreenNodeInTree {
+        // SAFETY: Our precondition.
+        unsafe { self.splice_children(index..=index, iter::empty(), arena) }
+    }
+
+    /// # Safety
+    ///
+    /// You must ensure there is no concurrent allocation.
+    #[must_use]
+    pub unsafe fn replace_child(
+        &self,
+        index: usize,
+        new_child: GreenElementInTree,
+        arena: &GreenTree,
+    ) -> GreenNodeInTree {
+        // SAFETY: Our precondition.
+        unsafe { self.splice_children(index..=index, iter::once(new_child), arena) }
+    }
+
+    /// # Safety
+    ///
+    /// You must ensure there is no concurrent allocation.
+    #[must_use]
+    pub unsafe fn splice_children<R, I>(
+        &self,
+        range: R,
+        replace_with: I,
+        arena: &GreenTree,
+    ) -> GreenNodeInTree
+    where
+        R: RangeBounds<usize>,
+        I: IntoIterator<Item = GreenElementInTree>,
+    {
+        let mut children: Vec<_> = self
+            .children()
+            .iter()
+            .map(|child| match *child {
+                GreenChild::Node { rel_offset: _, node } => GreenElementInTree::Node(node),
+                GreenChild::Token { rel_offset: _, token } => GreenElementInTree::Token(token),
+            })
+            .collect::<Vec<_>>();
+        children.splice(range, replace_with);
+
+        let text_len = children.iter().map(|child| child.text_len()).sum();
+
+        let mut rel_offset = TextSize::new(0);
+        let children = children.into_iter().map(|child| match child {
+            NodeOrToken::Node(node) => {
+                let old_rel_offset = rel_offset;
+                rel_offset += node.text_len();
+                GreenChild::Node { rel_offset: old_rel_offset, node }
+            }
+            NodeOrToken::Token(token) => {
+                let old_rel_offset = rel_offset;
+                rel_offset += token.text_len();
+                GreenChild::Token { rel_offset: old_rel_offset, token }
+            }
+        });
+
+        // SAFETY: Our precondition.
+        unsafe { arena.alloc_node_unchecked(self.kind(), text_len, children.len(), children) }
+    }
+}
+
+impl PartialEq for GreenNodeInTree {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.header() == other.header() && self.slice() == other.slice()
+        self.header() == other.header() && self.children() == other.children()
+    }
+}
+
+impl Eq for GreenNodeInTree {}
+
+impl Hash for GreenNodeInTree {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.header().hash(state);
+        self.children().hash(state);
     }
 }
 
 /// Internal node in the immutable tree.
 /// It has other nodes and tokens as children.
-#[derive(Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
+#[derive(Clone)]
 pub struct GreenNode {
-    ptr: ThinArc<GreenNodeHead, GreenChild>,
+    pub(super) node: GreenNodeInTree,
+    pub(super) arena: Arc<GreenTree>,
 }
 
-impl ToOwned for GreenNodeData {
-    type Owned = GreenNode;
-
+impl Hash for GreenNode {
     #[inline]
-    fn to_owned(&self) -> GreenNode {
-        let green = unsafe { GreenNode::from_raw(ptr::NonNull::from(self)) };
-        let green = ManuallyDrop::new(green);
-        GreenNode::clone(&green)
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.node.hash(state);
     }
 }
 
-impl Borrow<GreenNodeData> for GreenNode {
+impl PartialEq for GreenNode {
     #[inline]
-    fn borrow(&self) -> &GreenNodeData {
-        self
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
     }
 }
 
-impl From<Cow<'_, GreenNodeData>> for GreenNode {
-    #[inline]
-    fn from(cow: Cow<'_, GreenNodeData>) -> Self {
-        cow.into_owned()
-    }
-}
+impl Eq for GreenNode {}
 
-impl fmt::Debug for GreenNodeData {
+impl fmt::Debug for GreenNodeInTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GreenNode")
-            .field("kind", &self.kind())
-            .field("text_len", &self.text_len())
-            .field("n_children", &self.children().len())
+            .field("kind", &self.header().kind)
+            .field("text_len", &self.header().text_len)
+            .field("children", &self.children())
             .finish()
     }
 }
 
 impl fmt::Debug for GreenNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data: &GreenNodeData = self;
-        fmt::Debug::fmt(data, f)
+        fmt::Debug::fmt(&self.node, f)
     }
 }
 
 impl fmt::Display for GreenNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data: &GreenNodeData = self;
-        fmt::Display::fmt(data, f)
+        fmt::Display::fmt(&self.node, f)
     }
 }
 
-impl fmt::Display for GreenNodeData {
+impl fmt::Display for GreenNodeInTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for child in self.children() {
             write!(f, "{}", child)?;
@@ -110,152 +318,42 @@ impl fmt::Display for GreenNodeData {
     }
 }
 
-impl GreenNodeData {
+impl GreenNode {
     #[inline]
-    fn header(&self) -> &GreenNodeHead {
-        &self.data.header
-    }
-
-    #[inline]
-    fn slice(&self) -> &[GreenChild] {
-        self.data.slice()
+    pub(crate) fn into_raw_parts(self) -> (GreenNodeInTree, Arc<GreenTree>) {
+        (self.node, self.arena)
     }
 
     /// Kind of this node.
     #[inline]
     pub fn kind(&self) -> SyntaxKind {
-        self.header().kind
+        self.node.kind()
     }
 
     /// Returns the length of the text covered by this node.
     #[inline]
     pub fn text_len(&self) -> TextSize {
-        self.header().text_len
+        self.node.text_len()
     }
 
     /// Children of this node.
     #[inline]
     pub fn children(&self) -> Children<'_> {
-        Children { raw: self.slice().iter() }
-    }
-
-    pub(crate) fn child_at_range(
-        &self,
-        rel_range: TextRange,
-    ) -> Option<(usize, TextSize, GreenElementRef<'_>)> {
-        let idx = self
-            .slice()
-            .binary_search_by(|it| {
-                let child_range = it.rel_range();
-                TextRange::ordering(child_range, rel_range)
-            })
-            // XXX: this handles empty ranges
-            .unwrap_or_else(|it| it.saturating_sub(1));
-        let child = &self.slice().get(idx).filter(|it| it.rel_range().contains_range(rel_range))?;
-        Some((idx, child.rel_offset(), child.as_ref()))
-    }
-
-    #[must_use]
-    pub fn replace_child(&self, index: usize, new_child: GreenElement) -> GreenNode {
-        let mut replacement = Some(new_child);
-        let children = self.children().enumerate().map(|(i, child)| {
-            if i == index { replacement.take().unwrap() } else { child.to_owned() }
-        });
-        GreenNode::new(self.kind(), children)
-    }
-    #[must_use]
-    pub fn insert_child(&self, index: usize, new_child: GreenElement) -> GreenNode {
-        // https://github.com/rust-lang/rust/issues/34433
-        self.splice_children(index..index, iter::once(new_child))
-    }
-    #[must_use]
-    pub fn remove_child(&self, index: usize) -> GreenNode {
-        self.splice_children(index..=index, iter::empty())
-    }
-    #[must_use]
-    pub fn splice_children<R, I>(&self, range: R, replace_with: I) -> GreenNode
-    where
-        R: ops::RangeBounds<usize>,
-        I: IntoIterator<Item = GreenElement>,
-    {
-        let mut children: Vec<_> = self.children().map(|it| it.to_owned()).collect();
-        children.splice(range, replace_with);
-        GreenNode::new(self.kind(), children)
-    }
-}
-
-impl ops::Deref for GreenNode {
-    type Target = GreenNodeData;
-
-    #[inline]
-    fn deref(&self) -> &GreenNodeData {
-        let repr: &Repr = &self.ptr;
-        unsafe {
-            let repr: &ReprThin = &*(repr as *const Repr as *const ReprThin);
-            mem::transmute::<&ReprThin, &GreenNodeData>(repr)
-        }
-    }
-}
-
-impl GreenNode {
-    /// Creates new Node.
-    #[inline]
-    pub fn new<I>(kind: SyntaxKind, children: I) -> GreenNode
-    where
-        I: IntoIterator<Item = GreenElement>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let mut text_len: TextSize = 0.into();
-        let children = children.into_iter().map(|el| {
-            let rel_offset = text_len;
-            text_len += el.text_len();
-            match el {
-                NodeOrToken::Node(node) => GreenChild::Node { rel_offset, node },
-                NodeOrToken::Token(token) => GreenChild::Token { rel_offset, token },
-            }
-        });
-
-        let data = ThinArc::from_header_and_iter(
-            GreenNodeHead { kind, text_len: 0.into(), _c: Count::new() },
-            children,
-        );
-
-        // XXX: fixup `text_len` after construction, because we can't iterate
-        // `children` twice.
-        let data = {
-            let mut data = Arc::from_thin(data);
-            Arc::get_mut(&mut data).unwrap().header.text_len = text_len;
-            Arc::into_thin(data)
-        };
-
-        GreenNode { ptr: data }
-    }
-
-    #[inline]
-    pub(crate) fn into_raw(this: GreenNode) -> ptr::NonNull<GreenNodeData> {
-        let green = ManuallyDrop::new(this);
-        let green: &GreenNodeData = &green;
-        ptr::NonNull::from(green)
-    }
-
-    #[inline]
-    pub(crate) unsafe fn from_raw(ptr: ptr::NonNull<GreenNodeData>) -> GreenNode {
-        unsafe {
-            let arc = Arc::from_raw(&ptr.as_ref().data as *const ReprThin);
-            let arc = mem::transmute::<Arc<ReprThin>, ThinArc<GreenNodeHead, GreenChild>>(arc);
-            GreenNode { ptr: arc }
-        }
+        Children { raw: self.node.children().iter(), arena: self.arena.clone() }
     }
 }
 
 impl GreenChild {
     #[inline]
-    pub(crate) fn as_ref(&self) -> GreenElementRef {
+    pub(crate) fn as_green_element(&self, arena: Arc<GreenTree>) -> GreenElement {
         match self {
-            GreenChild::Node { node, .. } => NodeOrToken::Node(node),
-            GreenChild::Token { token, .. } => NodeOrToken::Token(token),
+            GreenChild::Node { node, .. } => NodeOrToken::Node(GreenNode { node: *node, arena }),
+            GreenChild::Token { token, .. } => {
+                NodeOrToken::Token(GreenToken { token: *token, _arena: arena })
+            }
         }
     }
+
     #[inline]
     pub(crate) fn rel_offset(&self) -> TextSize {
         match self {
@@ -265,15 +363,18 @@ impl GreenChild {
         }
     }
     #[inline]
-    fn rel_range(&self) -> TextRange {
-        let len = self.as_ref().text_len();
-        TextRange::at(self.rel_offset(), len)
+    pub(crate) fn rel_range(&self) -> TextRange {
+        match *self {
+            GreenChild::Node { rel_offset, node } => TextRange::at(rel_offset, node.text_len()),
+            GreenChild::Token { rel_offset, token } => TextRange::at(rel_offset, token.text_len()),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Children<'a> {
     pub(crate) raw: slice::Iter<'a, GreenChild>,
+    arena: Arc<GreenTree>,
 }
 
 // NB: forward everything stable that iter::Slice specializes as of Rust 1.39.0
@@ -285,11 +386,11 @@ impl ExactSizeIterator for Children<'_> {
 }
 
 impl<'a> Iterator for Children<'a> {
-    type Item = GreenElementRef<'a>;
+    type Item = GreenElement;
 
     #[inline]
-    fn next(&mut self) -> Option<GreenElementRef<'a>> {
-        self.raw.next().map(GreenChild::as_ref)
+    fn next(&mut self) -> Option<GreenElement> {
+        self.raw.next().map(|child| child.as_green_element(self.arena.clone()))
     }
 
     #[inline]
@@ -307,7 +408,7 @@ impl<'a> Iterator for Children<'a> {
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        self.raw.nth(n).map(GreenChild::as_ref)
+        self.raw.nth(n).map(|child| child.as_green_element(self.arena.clone()))
     }
 
     #[inline]
@@ -334,12 +435,12 @@ impl<'a> Iterator for Children<'a> {
 impl DoubleEndedIterator for Children<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.raw.next_back().map(GreenChild::as_ref)
+        self.raw.next_back().map(|child| child.as_green_element(self.arena.clone()))
     }
 
     #[inline]
     fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
-        self.raw.nth_back(n).map(GreenChild::as_ref)
+        self.raw.nth_back(n).map(|child| child.as_green_element(self.arena.clone()))
     }
 
     #[inline]

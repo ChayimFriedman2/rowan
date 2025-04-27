@@ -5,15 +5,19 @@ mod builder;
 mod node_cache;
 mod arena;
 
-use self::element::GreenElement;
-
-pub(crate) use self::{element::GreenElementRef, node::GreenChild};
+pub(crate) use self::{
+    arena::GreenTree,
+    element::GreenElementInTree,
+    node::{GreenChild, GreenNodeInTree},
+    token::GreenTokenInTree,
+};
 
 pub use self::{
     builder::{Checkpoint, GreenNodeBuilder},
-    node::{Children, GreenNode, GreenNodeData},
+    element::GreenElement,
+    node::{Children, GreenNode},
     node_cache::NodeCache,
-    token::{GreenToken, GreenTokenData},
+    token::GreenToken,
 };
 
 /// SyntaxKind is a type tag for each token or node.
