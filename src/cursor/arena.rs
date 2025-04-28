@@ -30,6 +30,7 @@ pub(super) struct RedTree {
     /// memory usage may grow unexpectedly.
     ///
     /// This is only used for immutable trees; mutable trees use the sll to deduplicate nodes.
+    #[expect(unused)]
     allocated_map: RefCell<FxHashMap<NodeKey, NonNull<NodeData>>>,
 
     /// See [`GreenTree::dependencies`].
@@ -165,11 +166,12 @@ impl RedTree {
             };
         }
 
-        *self
-            .allocated_map
-            .borrow_mut()
-            .entry(res.key(false))
-            .or_insert_with(|| NonNull::from(self.arena.alloc(res)))
+        // *self
+        //     .allocated_map
+        //     .borrow_mut()
+        //     .entry(res.key(false))
+        //     .or_insert_with(|| NonNull::from(self.arena.alloc(res)))
+        NonNull::from(self.arena.alloc(res))
     }
 
     #[inline]
