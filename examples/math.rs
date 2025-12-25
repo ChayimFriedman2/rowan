@@ -13,7 +13,46 @@
 //!     - "+" Token(Add)
 //!     - "4" Token(Number)
 
-use rowan::{GreenNodeBuilder, NodeOrToken};
+mod ast {
+    use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
+
+    #[derive(Clone, Copy)]
+    pub enum Operand<'a> {
+        Number(SyntaxToken<'a>),
+        Operation(Operation<'a>),
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Operation<'a>(SyntaxNode<'a>);
+
+    impl<'a> Operation<'a> {
+        pub fn cast(node: SyntaxNode<'a>) -> Option<Self> {
+            if node.kind() == SyntaxKind::OPERATION { Some(Self(node)) } else { None }
+        }
+
+        pub fn op(self) -> SyntaxToken<'a> {
+            self.0.token_at(1)
+        }
+
+        fn operand(self, idx: usize) -> Operand<'a> {
+            if let Some(number) = self.0.try_token_at(idx) {
+                Operand::Number(number)
+            } else {
+                Operand::Operation(Operation::cast(self.0.node_at(idx)).unwrap())
+            }
+        }
+
+        pub fn lhs(self) -> Operand<'a> {
+            self.operand(0)
+        }
+
+        pub fn rhs(self) -> Operand<'a> {
+            self.operand(2)
+        }
+    }
+}
+
+use rowan::{NodeOrToken, TextSize, TreeBuilder};
 use std::iter::Peekable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,14 +93,14 @@ impl rowan::Language for Lang {
     }
 }
 
-type SyntaxNode = rowan::SyntaxNode<Lang>;
+type SyntaxNode<'a> = rowan::SyntaxNode<'a, Lang>;
 #[allow(unused)]
-type SyntaxToken = rowan::SyntaxToken<Lang>;
+type SyntaxToken<'a> = rowan::SyntaxToken<'a, Lang>;
 #[allow(unused)]
-type SyntaxElement = rowan::NodeOrToken<SyntaxNode, SyntaxToken>;
+type SyntaxElement<'a> = rowan::SyntaxElement<'a, Lang>;
 
 struct Parser<I: Iterator<Item = (SyntaxKind, String)>> {
-    builder: GreenNodeBuilder<'static>,
+    builder: TreeBuilder,
     iter: Peekable<I>,
 }
 impl<I: Iterator<Item = (SyntaxKind, String)>> Parser<I> {
@@ -73,11 +112,16 @@ impl<I: Iterator<Item = (SyntaxKind, String)>> Parser<I> {
     }
     fn bump(&mut self) {
         if let Some((token, string)) = self.iter.next() {
-            self.builder.token(token.into(), string.as_str());
+            self.builder.token(
+                std::iter::empty(),
+                token.into(),
+                TextSize::of(&string),
+                std::iter::empty(),
+            );
         }
     }
-    fn parse_val(&mut self) {
         match self.peek() {
+    fn parse_val(&mut self) {
             Some(NUMBER) => self.bump(),
             _ => {
                 self.builder.start_node(ERROR.into());

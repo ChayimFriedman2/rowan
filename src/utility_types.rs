@@ -1,8 +1,8 @@
-use std::{
-    fmt,
-    ops::{AddAssign, Deref},
-};
-use text_size::TextSize;
+use std::fmt;
+
+use crate::api::{SyntaxNode, SyntaxToken};
+
+pub type SyntaxElement<'a, L> = NodeOrToken<SyntaxNode<'a, L>, SyntaxToken<'a, L>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NodeOrToken<N, T> {
@@ -40,44 +40,11 @@ impl<N, T> NodeOrToken<N, T> {
     }
 }
 
-impl<N: Deref, T: Deref> NodeOrToken<N, T> {
-    pub(crate) fn as_deref(&self) -> NodeOrToken<&N::Target, &T::Target> {
-        match self {
-            NodeOrToken::Node(node) => NodeOrToken::Node(node),
-            NodeOrToken::Token(token) => NodeOrToken::Token(token),
-        }
-    }
-}
-
 impl<N: fmt::Display, T: fmt::Display> fmt::Display for NodeOrToken<N, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NodeOrToken::Node(node) => fmt::Display::fmt(node, f),
             NodeOrToken::Token(token) => fmt::Display::fmt(token, f),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Direction {
-    Next,
-    Prev,
-}
-
-/// `WalkEvent` describes tree walking process.
-#[derive(Debug, Copy, Clone)]
-pub enum WalkEvent<T> {
-    /// Fired before traversing the node.
-    Enter(T),
-    /// Fired after the node is traversed.
-    Leave(T),
-}
-
-impl<T> WalkEvent<T> {
-    pub fn map<F: FnOnce(T) -> U, U>(self, f: F) -> WalkEvent<U> {
-        match self {
-            WalkEvent::Enter(it) => WalkEvent::Enter(f(it)),
-            WalkEvent::Leave(it) => WalkEvent::Leave(f(it)),
         }
     }
 }
@@ -148,25 +115,3 @@ impl<T> Iterator for TokenAtOffset<T> {
 }
 
 impl<T> ExactSizeIterator for TokenAtOffset<T> {}
-
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum Delta<T> {
-    Add(T),
-    Sub(T),
-}
-
-// This won't be coherent :-(
-// impl<T: AddAssign + SubAssign> AddAssign<Delta<T>> for T
-macro_rules! impls {
-    ($($ty:ident)*) => {$(
-        impl AddAssign<Delta<$ty>> for $ty {
-            fn add_assign(&mut self, rhs: Delta<$ty>) {
-                match rhs {
-                    Delta::Add(amt) => *self += amt,
-                    Delta::Sub(amt) => *self -= amt,
-                }
-            }
-        }
-    )*};
-}
-impls!(u32 TextSize);

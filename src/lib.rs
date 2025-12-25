@@ -6,36 +6,27 @@
     future_incompatible,
     // missing_docs,
 )]
-#![deny(unsafe_code)]
+#![deny(unsafe_code, rust_2018_idioms)]
 
-#[allow(unsafe_code)]
-mod green;
-#[allow(unsafe_code)]
-pub mod cursor;
-
-pub mod api;
-mod syntax_text;
 mod utility_types;
 
-mod cow_mut;
+mod builder;
 #[allow(unsafe_code)]
-mod sll;
+mod nodes;
+mod api;
+
 #[allow(unsafe_code)]
-mod arc;
-#[cfg(feature = "serde1")]
-mod serde_impls;
-pub mod ast;
+mod maybe_dangling;
 
 pub use text_size::{TextLen, TextRange, TextSize};
 
 pub use crate::{
     api::{
-        Language, SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
+        Children, ChildrenWithLists, ChildrenWithTokens, ChildrenWithTokensAndLists, Language,
+        NodeOrList, NodeOrTokenOrList, Preorder, PreorderWithTokens, SyntaxList, SyntaxListIter,
+        SyntaxNode, SyntaxToken, SyntaxTree, TriviaIter, WalkEvent, WalkEventWithTokens,
     },
-    green::{
-        Checkpoint, Children, GreenNode, GreenNodeBuilder, GreenNodeData, GreenToken,
-        GreenTokenData, NodeCache, SyntaxKind,
-    },
-    syntax_text::SyntaxText,
-    utility_types::{Direction, NodeOrToken, TokenAtOffset, WalkEvent},
+    builder::TreeBuilder,
+    nodes::SyntaxKind,
+    utility_types::{NodeOrToken, SyntaxElement, TokenAtOffset},
 };
