@@ -630,6 +630,11 @@ impl SyntaxNode {
     }
 
     #[inline]
+    pub fn tree_top(&self) -> SyntaxNode {
+        self.ancestors().last().unwrap()
+    }
+
+    #[inline]
     pub fn children(&self) -> SyntaxNodeChildren {
         SyntaxNodeChildren::new(self.clone())
     }
@@ -911,6 +916,11 @@ impl SyntaxToken {
         std::iter::successors(self.parent(), SyntaxNode::parent)
     }
 
+    #[inline]
+    pub fn tree_top(&self) -> SyntaxNode {
+        self.ancestors().last().unwrap()
+    }
+
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
         self.data().next_sibling_or_token()
     }
@@ -1011,6 +1021,14 @@ impl SyntaxElement {
             NodeOrToken::Token(it) => it.parent(),
         };
         iter::successors(first, SyntaxNode::parent)
+    }
+
+    #[inline]
+    pub fn tree_top(&self) -> SyntaxNode {
+        match self {
+            NodeOrToken::Node(it) => it.tree_top(),
+            NodeOrToken::Token(it) => it.tree_top(),
+        }
     }
 
     pub fn first_token(&self) -> Option<SyntaxToken> {

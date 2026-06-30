@@ -133,6 +133,10 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.ancestors().map(SyntaxNode::from)
     }
 
+    pub fn tree_top(&self) -> SyntaxNode<L> {
+        SyntaxNode::from(self.raw.tree_top())
+    }
+
     pub fn children(&self) -> SyntaxNodeChildren<L> {
         SyntaxNodeChildren { raw: self.raw.children(), _p: PhantomData }
     }
@@ -301,6 +305,10 @@ impl<L: Language> SyntaxToken<L> {
         self.raw.ancestors().map(SyntaxNode::from)
     }
 
+    pub fn tree_top(&self) -> SyntaxNode<L> {
+        SyntaxNode::from(self.raw.tree_top())
+    }
+
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement<L>> {
         self.raw.next_sibling_or_token().map(NodeOrToken::from)
     }
@@ -364,6 +372,13 @@ impl<L: Language> SyntaxElement<L> {
             NodeOrToken::Token(it) => it.parent(),
         };
         iter::successors(first, SyntaxNode::parent)
+    }
+
+    pub fn tree_top(&self) -> SyntaxNode<L> {
+        match self {
+            NodeOrToken::Node(it) => it.tree_top(),
+            NodeOrToken::Token(it) => it.tree_top(),
+        }
     }
 
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement<L>> {
