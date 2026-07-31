@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt, iter, marker::PhantomData};
+use std::{fmt, iter, marker::PhantomData};
 
 use crate::{
     cursor, green::GreenTokenData, Direction, GreenNode, GreenNodeData, GreenToken, NodeOrToken,
@@ -121,7 +121,7 @@ impl<L: Language> SyntaxNode<L> {
         self.raw.text()
     }
 
-    pub fn green(&self) -> Cow<'_, GreenNodeData> {
+    pub fn green(&self) -> &GreenNodeData {
         self.raw.green()
     }
 

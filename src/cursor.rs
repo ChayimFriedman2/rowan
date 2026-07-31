@@ -32,7 +32,6 @@
 // A root `NodeData` owns its green node and is responsible for freeing it.
 
 use std::{
-    borrow::Cow,
     cell::Cell,
     fmt,
     hash::{Hash, Hasher},
@@ -302,7 +301,7 @@ impl SyntaxNode {
     }
 
     pub fn clone_subtree(&self) -> SyntaxNode {
-        SyntaxNode::new_root(self.green().into())
+        SyntaxNode::new_root(self.green().to_owned())
     }
 
     #[inline]
@@ -349,8 +348,8 @@ impl SyntaxNode {
     }
 
     #[inline]
-    pub fn green(&self) -> Cow<'_, GreenNodeData> {
-        Cow::Borrowed(self.green_ref())
+    pub fn green(&self) -> &GreenNodeData {
+        self.green_ref()
     }
     #[inline]
     fn green_ref(&self) -> &GreenNodeData {
