@@ -153,7 +153,7 @@ impl NodeData {
             green,
             offset,
         };
-        ptr::NonNull::from(Box::leak(Box::new(res)))
+        unsafe { ptr::NonNull::new_unchecked(Box::into_raw(Box::new(res))) }
     }
 
     #[inline]
