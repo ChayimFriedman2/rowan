@@ -7,6 +7,12 @@
 //! `SyntaxNode`. This allows cursor to provide iteration over both ancestors
 //! and descendants, as well as a cheep access to absolute offset of the node in
 //! file.
+//!
+//! By default `SyntaxNode`s are immutable, but you can get a mutable copy of
+//! the tree by calling `clone_for_update`. Mutation is based on interior
+//! mutability and doesn't need `&mut`. You can have two `SyntaxNode`s pointing
+//! at different parts of the same tree; mutations via the first node will be
+//! reflected in the other.
 
 // Implementation notes:
 //
@@ -29,14 +35,60 @@
 // pointing somewhere in the middle of the tree, then all `NodeData` on the path
 // from that point towards the root have ref count equal to one.
 //
-// A root `NodeData` owns its green node and is responsible for freeing it.
+// `NodeData` which doesn't have a parent (is a root) owns the corresponding
+// green node or token, and is responsible for freeing it.
+//
+// That's mostly it for the immutable subset of the API. Mutation is fun though,
+// you'll like it!
+//
+// Mutability is a run-time property of a tree of `NodeData`. The whole tree is
+// either mutable or immutable. `clone_for_update` clones the whole tree of
+// `NodeData`s, making it mutable (note that the green tree is re-used).
+//
+// If the tree is mutable, then all live `NodeData` are additionally liked to
+// each other via intrusive liked lists. Specifically, there are two pointers to
+// siblings, as well as a pointer to the first child. Note that only live nodes
+// are considered. If the user only has `SyntaxNode`s for  the first and last
+// children of some particular node, then their `NodeData` will point at each
+// other.
+//
+// The links are used to propagate mutations across the tree. Specifically, each
+// `NodeData` remembers it's index in parent. When the node is detached from or
+// attached to the tree, we need to adjust the indices of all subsequent
+// siblings. That's what makes the `for c in node.children() { c.detach() }`
+// pattern work despite the apparent iterator invalidation.
+//
+// This code is encapsulated into the sorted linked list (`sll`) module.
+//
+// The actual mutation consist of functionally "mutating" (creating a
+// structurally shared copy) the green node, and then re-spinning the tree. This
+// is a delicate process: `NodeData` point directly to the green nodes, so we
+// must make sure that those nodes don't move. Additionally, during mutation a
+// node might become or might stop being a root, so we must take care to not
+// double free / leak its green node.
+//
+// Because we can change green nodes using only shared references, handing out
+// references into green nodes in the public API would be unsound. We don't do
+// that, but we do use such references internally a lot. Additionally, for
+// tokens the underlying green token actually is immutable, so we can, and do
+// return `&str`.
+//
+// Invariants [must not leak outside of the module]:
+//    - Mutability is the property of the whole tree. Intermixing elements that
+//      differ in mutability is not allowed.
+//    - Mutability property is persistent.
+//    - References to the green elements' data are not exposed into public API
+//      when the tree is mutable.
+//    - TBD
 
 use std::{
+    borrow::Cow,
     cell::Cell,
     fmt,
     hash::{Hash, Hasher},
     iter,
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
+    ops::Range,
     ptr, slice,
 };
 
@@ -44,12 +96,14 @@ use countme::Count;
 
 use crate::{
     green::{GreenChild, GreenElementRef, GreenNodeData, GreenTokenData, SyntaxKind},
+    sll,
+    utility_types::Delta,
     Direction, GreenNode, GreenToken, NodeOrToken, SyntaxText, TextRange, TextSize, TokenAtOffset,
     WalkEvent,
 };
 
 enum Green {
-    Node { ptr: ptr::NonNull<GreenNodeData> },
+    Node { ptr: Cell<ptr::NonNull<GreenNodeData>> },
     Token { ptr: ptr::NonNull<GreenTokenData> },
 }
 
@@ -59,10 +113,32 @@ struct NodeData {
     _c: Count<_SyntaxElement>,
 
     rc: Cell<u32>,
-    parent: Option<ptr::NonNull<NodeData>>,
-    index: u32,
+    parent: Cell<Option<ptr::NonNull<NodeData>>>,
+    index: Cell<u32>,
     green: Green,
+
+    /// Invariant: never changes after NodeData is created.
+    mutable: bool,
+    /// Absolute offset for immutable nodes, unused for mutable nodes.
     offset: TextSize,
+    // The following links only have meaning when `mutable` is true.
+    first: Cell<*const NodeData>,
+    /// Invariant: never null if mutable.
+    next: Cell<*const NodeData>,
+    /// Invariant: never null if mutable.
+    prev: Cell<*const NodeData>,
+}
+
+unsafe impl sll::Elem for NodeData {
+    fn prev(&self) -> &Cell<*const Self> {
+        &self.prev
+    }
+    fn next(&self) -> &Cell<*const Self> {
+        &self.next
+    }
+    fn key(&self) -> &Cell<u32> {
+        &self.index
+    }
 }
 
 pub type SyntaxElement = NodeOrToken<SyntaxNode, SyntaxToken>;
@@ -114,10 +190,14 @@ impl Drop for SyntaxToken {
 unsafe fn free(mut data: ptr::NonNull<NodeData>) {
     loop {
         debug_assert_eq!(data.as_ref().rc.get(), 0);
+        debug_assert!(data.as_ref().first.get().is_null());
         let node = Box::from_raw(data.as_ptr());
-        match node.parent {
+        match node.parent.take() {
             Some(parent) => {
                 debug_assert!(parent.as_ref().rc.get() > 0);
+                if node.mutable {
+                    sll::unlink(&parent.as_ref().first, &*node)
+                }
                 if parent.as_ref().dec_rc() {
                     data = parent;
                 } else {
@@ -125,10 +205,13 @@ unsafe fn free(mut data: ptr::NonNull<NodeData>) {
                 }
             }
             None => {
-                if let Green::Node { ptr } = &node.green {
-                    let _ = GreenNode::from_raw(*ptr);
-                } else {
-                    unreachable!("a token cannot be a root");
+                match &node.green {
+                    Green::Node { ptr } => {
+                        let _ = GreenNode::from_raw(ptr.get());
+                    }
+                    Green::Token { ptr } => {
+                        let _ = GreenToken::from_raw(*ptr);
+                    }
                 }
                 break;
             }
@@ -143,17 +226,57 @@ impl NodeData {
         index: u32,
         offset: TextSize,
         green: Green,
+        mutable: bool,
     ) -> ptr::NonNull<NodeData> {
         let parent = ManuallyDrop::new(parent);
         let res = NodeData {
             _c: Count::new(),
             rc: Cell::new(1),
-            parent: parent.as_ref().map(|it| it.ptr),
-            index,
+            parent: Cell::new(parent.as_ref().map(|it| it.ptr)),
+            index: Cell::new(index),
             green,
+
+            mutable,
             offset,
+            first: Cell::new(ptr::null()),
+            next: Cell::new(ptr::null()),
+            prev: Cell::new(ptr::null()),
         };
-        unsafe { ptr::NonNull::new_unchecked(Box::into_raw(Box::new(res))) }
+        unsafe {
+            if mutable {
+                let res_ptr: *const NodeData = &res;
+                match sll::init((*res_ptr).parent().map(|it| &it.first), res_ptr.as_ref().unwrap())
+                {
+                    sll::AddToSllResult::AlreadyInSll(node) => {
+                        if cfg!(debug_assertions) {
+                            assert_eq!((*node).index(), (*res_ptr).index());
+                            match ((*node).green(), (*res_ptr).green()) {
+                                (NodeOrToken::Node(lhs), NodeOrToken::Node(rhs)) => {
+                                    assert!(ptr::eq(lhs, rhs))
+                                }
+                                (NodeOrToken::Token(lhs), NodeOrToken::Token(rhs)) => {
+                                    assert!(ptr::eq(lhs, rhs))
+                                }
+                                it => {
+                                    panic!("node/token confusion: {:?}", it)
+                                }
+                            }
+                        }
+
+                        ManuallyDrop::into_inner(parent);
+                        let res = node as *mut NodeData;
+                        (*res).inc_rc();
+                        return ptr::NonNull::new_unchecked(res);
+                    }
+                    it => {
+                        let res = Box::into_raw(Box::new(res));
+                        it.add_to_sll(res);
+                        return ptr::NonNull::new_unchecked(res);
+                    }
+                }
+            }
+            ptr::NonNull::new_unchecked(Box::into_raw(Box::new(res)))
+        }
     }
 
     #[inline]
@@ -175,7 +298,7 @@ impl NodeData {
     #[inline]
     fn key(&self) -> (ptr::NonNull<()>, TextSize) {
         let ptr = match &self.green {
-            Green::Node { ptr } => ptr.cast(),
+            Green::Node { ptr } => ptr.get().cast(),
             Green::Token { ptr } => ptr.cast(),
         };
         (ptr, self.offset())
@@ -191,20 +314,20 @@ impl NodeData {
 
     #[inline]
     fn parent(&self) -> Option<&NodeData> {
-        self.parent.map(|it| unsafe { &*it.as_ptr() })
+        self.parent.get().map(|it| unsafe { &*it.as_ptr() })
     }
 
     #[inline]
     fn green(&self) -> GreenElementRef<'_> {
         match &self.green {
-            Green::Node { ptr } => GreenElementRef::Node(unsafe { &*ptr.as_ptr() }),
-            Green::Token { ptr } => GreenElementRef::Token(unsafe { ptr.as_ref() }),
+            Green::Node { ptr } => GreenElementRef::Node(unsafe { &*ptr.get().as_ptr() }),
+            Green::Token { ptr } => GreenElementRef::Token(unsafe { &*ptr.as_ref() }),
         }
     }
     #[inline]
     fn green_siblings(&self) -> slice::Iter<'_, GreenChild> {
         match &self.parent().map(|it| &it.green) {
-            Some(Green::Node { ptr }) => unsafe { &*ptr.as_ptr() }.children().raw,
+            Some(Green::Node { ptr }) => unsafe { &*ptr.get().as_ptr() }.children().raw,
             Some(Green::Token { .. }) => {
                 debug_assert!(false);
                 [].iter()
@@ -214,12 +337,30 @@ impl NodeData {
     }
     #[inline]
     fn index(&self) -> u32 {
-        self.index
+        self.index.get()
     }
 
     #[inline]
     fn offset(&self) -> TextSize {
-        self.offset
+        if self.mutable {
+            self.offset_mut()
+        } else {
+            self.offset
+        }
+    }
+
+    #[cold]
+    fn offset_mut(&self) -> TextSize {
+        let mut res = TextSize::from(0);
+
+        let mut node = self;
+        while let Some(parent) = node.parent() {
+            let green = parent.green().into_node().unwrap();
+            res += green.children().raw.nth(node.index() as usize).unwrap().rel_offset();
+            node = parent;
+        }
+
+        res
     }
 
     #[inline]
@@ -281,13 +422,115 @@ impl NodeData {
             Some(SyntaxElement::new(child.as_ref(), parent, index as u32, offset))
         })
     }
+
+    fn detach(&self) {
+        assert!(self.mutable);
+        assert!(self.rc.get() > 0);
+        let parent_ptr = match self.parent.take() {
+            Some(parent) => parent,
+            None => return,
+        };
+
+        unsafe {
+            sll::adjust(self, self.index() + 1, Delta::Sub(1));
+            let parent = parent_ptr.as_ref();
+            sll::unlink(&parent.first, self);
+
+            // Add strong ref to green
+            match self.green().to_owned() {
+                NodeOrToken::Node(it) => {
+                    GreenNode::into_raw(it);
+                }
+                NodeOrToken::Token(it) => {
+                    GreenToken::into_raw(it);
+                }
+            }
+
+            match parent.green() {
+                NodeOrToken::Node(green) => {
+                    let green = green.remove_child(self.index() as usize);
+                    parent.respine(green)
+                }
+                NodeOrToken::Token(_) => unreachable!(),
+            }
+
+            if parent.dec_rc() {
+                free(parent_ptr)
+            }
+        }
+    }
+    fn attach_child(&self, index: usize, child: &NodeData) {
+        assert!(self.mutable && child.mutable && child.parent().is_none());
+        assert!(self.rc.get() > 0 && child.rc.get() > 0);
+
+        unsafe {
+            child.index.set(index as u32);
+            child.parent.set(Some(self.into()));
+            self.inc_rc();
+
+            if !self.first.get().is_null() {
+                sll::adjust(&*self.first.get(), index as u32, Delta::Add(1));
+            }
+
+            match sll::link(&self.first, child) {
+                sll::AddToSllResult::AlreadyInSll(_) => {
+                    panic!("Child already in sorted linked list")
+                }
+                it => it.add_to_sll(child),
+            }
+
+            match self.green() {
+                NodeOrToken::Node(green) => {
+                    // Child is root, so it ownes the green node. Steal it!
+                    let child_green = match &child.green {
+                        Green::Node { ptr } => GreenNode::from_raw(ptr.get()).into(),
+                        Green::Token { ptr } => GreenToken::from_raw(*ptr).into(),
+                    };
+
+                    let green = green.insert_child(index, child_green);
+                    self.respine(green);
+                }
+                NodeOrToken::Token(_) => unreachable!(),
+            }
+        }
+    }
+    unsafe fn respine(&self, mut new_green: GreenNode) {
+        let mut node = self;
+        loop {
+            let old_green = match &node.green {
+                Green::Node { ptr } => ptr.replace(ptr::NonNull::from(&*new_green)),
+                Green::Token { .. } => unreachable!(),
+            };
+            match node.parent() {
+                Some(parent) => match parent.green() {
+                    NodeOrToken::Node(parent_green) => {
+                        new_green =
+                            parent_green.replace_child(node.index() as usize, new_green.into());
+                        node = parent;
+                    }
+                    _ => unreachable!(),
+                },
+                None => {
+                    mem::forget(new_green);
+                    let _ = GreenNode::from_raw(old_green);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl SyntaxNode {
     pub fn new_root(green: GreenNode) -> SyntaxNode {
         let green = GreenNode::into_raw(green);
-        let green = Green::Node { ptr: green };
-        SyntaxNode { ptr: NodeData::new(None, 0, 0.into(), green) }
+        let green = Green::Node { ptr: Cell::new(green) };
+        SyntaxNode { ptr: NodeData::new(None, 0, 0.into(), green, false) }
+    }
+
+    pub fn new_root_mut(green: GreenNode) -> SyntaxNode {
+        let green = GreenNode::into_raw(green);
+        let green = Green::Node { ptr: Cell::new(green) };
+        SyntaxNode { ptr: NodeData::new(None, 0, 0.into(), green, true) }
     }
 
     fn new_child(
@@ -296,12 +539,28 @@ impl SyntaxNode {
         index: u32,
         offset: TextSize,
     ) -> SyntaxNode {
-        let green = Green::Node { ptr: green.into() };
-        SyntaxNode { ptr: NodeData::new(Some(parent), index, offset, green) }
+        let mutable = parent.data().mutable;
+        let green = Green::Node { ptr: Cell::new(green.into()) };
+        SyntaxNode { ptr: NodeData::new(Some(parent), index, offset, green, mutable) }
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        self.data().mutable
+    }
+
+    pub fn clone_for_update(&self) -> SyntaxNode {
+        assert!(!self.data().mutable);
+        match self.parent() {
+            Some(parent) => {
+                let parent = parent.clone_for_update();
+                SyntaxNode::new_child(self.green_ref(), parent, self.data().index(), self.offset())
+            }
+            None => SyntaxNode::new_root_mut(self.green_ref().to_owned()),
+        }
     }
 
     pub fn clone_subtree(&self) -> SyntaxNode {
-        SyntaxNode::new_root(self.green().to_owned())
+        SyntaxNode::new_root(self.green().into())
     }
 
     #[inline]
@@ -348,8 +607,12 @@ impl SyntaxNode {
     }
 
     #[inline]
-    pub fn green(&self) -> &GreenNodeData {
-        self.green_ref()
+    pub fn green(&self) -> Cow<'_, GreenNodeData> {
+        let green_ref = self.green_ref();
+        match self.data().mutable {
+            false => Cow::Borrowed(green_ref),
+            true => Cow::Owned(green_ref.to_owned()),
+        }
     }
     #[inline]
     fn green_ref(&self) -> &GreenNodeData {
@@ -551,6 +814,35 @@ impl SyntaxNode {
             SyntaxElement::new(green, self.clone(), index as u32, self.offset() + rel_offset)
         })
     }
+
+    pub fn splice_children(&self, to_delete: Range<usize>, to_insert: Vec<SyntaxElement>) {
+        assert!(self.data().mutable, "immutable tree: {}", self);
+        for (i, child) in self.children_with_tokens().enumerate() {
+            if to_delete.contains(&i) {
+                child.detach();
+            }
+        }
+        let mut index = to_delete.start;
+        for child in to_insert {
+            self.attach_child(index, child);
+            index += 1;
+        }
+    }
+
+    pub fn detach(&self) {
+        assert!(self.data().mutable, "immutable tree: {}", self);
+        self.data().detach()
+    }
+
+    fn attach_child(&self, index: usize, child: SyntaxElement) {
+        assert!(self.data().mutable, "immutable tree: {}", self);
+        child.detach();
+        let data = match &child {
+            NodeOrToken::Node(it) => it.data(),
+            NodeOrToken::Token(it) => it.data(),
+        };
+        self.data().attach_child(index, data)
+    }
 }
 
 impl SyntaxToken {
@@ -560,8 +852,9 @@ impl SyntaxToken {
         index: u32,
         offset: TextSize,
     ) -> SyntaxToken {
+        let mutable = parent.data().mutable;
         let green = Green::Token { ptr: green.into() };
-        SyntaxToken { ptr: NodeData::new(Some(parent), index, offset, green) }
+        SyntaxToken { ptr: NodeData::new(Some(parent), index, offset, green, mutable) }
     }
 
     #[inline]
@@ -665,6 +958,11 @@ impl SyntaxToken {
                 .and_then(|element| element.last_token()),
         }
     }
+
+    pub fn detach(&self) {
+        assert!(self.data().mutable, "immutable tree: {}", self);
+        self.data().detach()
+    }
 }
 
 impl SyntaxElement {
@@ -764,6 +1062,13 @@ impl SyntaxElement {
         match self {
             NodeOrToken::Token(token) => TokenAtOffset::Single(token.clone()),
             NodeOrToken::Node(node) => node.token_at_offset(offset),
+        }
+    }
+
+    pub fn detach(&self) {
+        match self {
+            NodeOrToken::Node(it) => it.detach(),
+            NodeOrToken::Token(it) => it.detach(),
         }
     }
 }
