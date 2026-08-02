@@ -39,13 +39,6 @@ pub trait AstNode {
 
     fn syntax(&self) -> &SyntaxNode<Self::Language>;
 
-    fn clone_for_update(&self) -> Self
-    where
-        Self: Sized,
-    {
-        Self::cast(self.syntax().clone_for_update()).unwrap()
-    }
-
     fn clone_subtree(&self) -> Self
     where
         Self: Sized,
